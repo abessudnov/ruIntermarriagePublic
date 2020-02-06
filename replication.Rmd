@@ -1,0 +1,599 @@
+---
+title: "Replication file for the Russian intermarriage paper"
+author: "Alexey Bessudnov"
+date: "5 February 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+
+```
+
+The file has been compiled with R version 3.6.2 and R Markdown version 2.0.
+
+```{r}
+# Attaching the packages.
+library(tidyverse)
+# tidyverse version 1.3.0
+library(knitr)
+# knitr version 1.26
+library(gnm)
+# gnm version 1.1.0
+library(lmtest)
+# lmtest version 0.9.37
+```
+
+## Read the data
+
+The data contain six tables for the following cities: Moscow, Rostov, Kazan, Ufa, Makhachkala and Vladikavkaz. For each city the data represent the number of married couples by wife's and husband's ethnicities, only for locally born wives and for wives in three age groups (16 to 35, 36 to 50 and over 50), taken from the 2010 Russian census.
+
+```{r}
+Kazan <- read_csv("data/Kazan.csv")
+Moscow <- read_csv("data/Moscow.csv")
+Vladikavkaz <- read_csv("data/Vladikavkaz.csv")
+Makhachkala <- read_csv("data/Makhachkala.csv")
+Ufa <- read_csv("data/Ufa.csv")
+Rostov <- read_csv("data/Rostov.csv")
+```
+
+## Prepare the data
+
+First we want to collapse the data tables combining marriages across all three age groups. 
+
+```{r}
+# function to collapse data tables
+collapseData <- function(df) {
+        df %>%
+        group_by(ethn.wife, ethn.husband) %>%
+        summarise(
+                Freq = sum(Freq)
+        )
+}
+```
+
+## Visualise contingency tables for intermarriages
+
+The heatmaps represent logged frequencies in the contingency tables of ethnicities of wives and husbands. Grey cells are cells with zero observations (so that log is not defined). Note that the data are for locally born women only.
+
+This is Figure 1 in the paper.
+
+```{r}
+# function to produce heat maps
+heatMap <- function(df){
+        collapseData(df) %>%
+                ggplot(aes(x = ethn.wife, y = ethn.husband, fill = log(Freq))) +
+                geom_tile() +
+                xlab("Wife's ethnicity") +
+                ylab("Husband's ethnicity") +
+                        scale_fill_gradient(low = "white", high = "blue") +
+                        theme_classic() +
+                        theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                              axis.line = element_blank(),
+                              axis.ticks = element_blank())
+}
+
+# combine data tables for six cities into a list
+sixCities <- list(Moscow, Rostov, Kazan, Ufa, Vladikavkaz, Makhachkala)
+# assigning names to the elements
+names(sixCities) <- c("Moscow", "Rostov", "Kazan", "Ufa", "Vladikavkaz", "Makhachkala")
+
+sixCities %>% map(heatMap)
+```
+
+## Percent by ethnic group for men and women
+
+See Table 1 in the paper.
+
+Distribution of cases by ethnic group, separately for women and men.
+
+```{r}
+
+# Functions to summarise percentages by ethnic group for women and men
+
+percentByGroupWife <- function(df){
+        collapseData(df) %>%
+                group_by(ethn.wife) %>%
+                summarise(
+                        n = sum(Freq)
+                ) %>%
+                mutate(perc = n / sum(n) * 100)
+}
+
+percentByGroupHusband <- function(df){
+        collapseData(df) %>%
+                group_by(ethn.husband) %>%
+                summarise(
+                        n = sum(Freq)
+                ) %>%
+                mutate(perc = n / sum(n) * 100)
+}
+
+
+```
+
+Percentages for women.
+
+```{r}
+sixCities %>% map(percentByGroupWife)
+```
+
+Percentages for men.
+
+```{r}
+sixCities %>% map(percentByGroupHusband)
+```
+
+## Percent married within group
+
+See Table 1 in the paper.
+
+The tables below show the percentages married within group for the ethnic groups in six cities, separately for men and women (locally born women only).
+
+```{r}
+# a function to produce tables with % married within group
+marriedWithin <- function(df){
+        # number of women
+        df1 <- df %>%
+                group_by(ethn.wife) %>%
+                summarise(
+                        nWomen = sum(Freq)
+                )
+        # number of men
+        df2 <- df %>%
+                group_by(ethn.husband) %>%
+                summarise(
+                        nMen = sum(Freq)
+                ) %>%
+                rename(ethn.wife = ethn.husband)
+
+        # number of people married within their group
+
+        df3 <- df %>%
+                filter(ethn.wife == ethn.husband) %>%
+                group_by(ethn.wife) %>%
+                summarise(
+                        nWithin = sum(Freq)
+                )
+
+        # put it all together
+
+        df1 %>%
+                left_join(df2, by = c("ethn.wife")) %>%
+                left_join(df3, by = c("ethn.wife")) %>%
+                mutate(percWomenWithin = nWithin / nWomen * 100) %>%
+                mutate(percMenWithin = nWithin / nMen * 100) %>%
+                rename(ethnicity = ethn.wife) %>%
+                select(-nWithin) %>%
+                select(ethnicity, percWomenWithin, nWomen, percMenWithin, nMen) %>%
+                filter(ethnicity != "other")
+}
+
+sixCities %>% map(marriedWithin)
+
+```
+
+
+## Odds ratios for ethnic endogamy across six cities
+
+See Table 1 in the paper. 
+
+```{r}
+# a function to collapse data tables to 2x2 tables
+collapse2x2 <- function(df, ethn){
+        df %>%
+                mutate(ethn2F = ifelse(ethn.wife == ethn, 1, 0)) %>%
+                mutate(ethn2M = ifelse(ethn.husband == ethn, 1, 0)) %>%
+                group_by(ethn2F, ethn2M) %>%
+                summarise(
+                        Freq = sum(Freq)
+                )
+}
+
+# a function to calculate log odds ratios with 95% confidence intervals
+
+oddsRatio <- function(df){
+     # freq is a vector of counts
+     freq <- df %>% pull(Freq)
+     # a is the number of marriages where both husband and wife are not from group i
+     # as.numeric() added to avoid integer overflow
+     a <- as.numeric(freq[1])
+     # b and c are the number of intermarriages
+     b <- as.numeric(freq[2])
+     c <- as.numeric(freq[3])
+     # d is the number of endogamous intermarriages for group i
+     d <- as.numeric(freq[4])
+     # calculating log oddsratio
+     logOR <- log((a*d) / (b*c))
+     # calculating the standard error for log odds ratio (see https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1127651/)
+     se <- sqrt(1/a + 1/b + 1/c + 1/d)
+     # calculating 95% confidence intervals
+     lowerCI <- logOR - 1.96*se
+     upperCI <- logOR + 1.96*se
+     return(c(logOR, lowerCI, upperCI))
+}
+
+# a function to loop over all ethnic groups and age groups to produce a data frame with log ORs and CIs
+ethnOR <- function(df){
+        # Initialise a data frame  for the results
+        n  <- length(levels(df$ethn.wife)) * 3 # 3 age groups
+        results <- data.frame(city = rep(NA, n),
+                              ethnGroup = rep(NA, n),
+                              ageGroup = rep(NA, n),
+                              logOR = rep(NA, n),
+                              lowerCI = rep(NA, n),
+                              upperCI = rep(NA, n))
+        k <- 1
+        for (i in levels(as.factor(df$ethn.wife))) {
+                for (j in levels(as.factor(df$age.wife))){
+                        dfNew <- filter(df, age.wife == j)
+                        res <- collapse2x2(dfNew, i) %>%
+                                oddsRatio()
+                        results[k,1] <- df$city[1]
+                        results[k,2] <- i
+                        results[k,3] <- j
+                        results[k,4] <- res[1]
+                        results[k,5] <- res[2]
+                        results[k,6] <- res[3]
+                        k <- k + 1 
+                }
+        }
+        results
+}
+
+# same function as above (to produce ORs), but collapsing all age groups together.
+
+ethnOR2 <- function(df){
+        # Initialise a data frame  for the results
+        n  <- length(as.factor(levels(df$ethn.wife)))
+        results <- data.frame(city = rep(NA, n),
+                              ethnGroup = rep(NA, n),
+                              logOR = rep(NA, n),
+                              lowerCI = rep(NA, n),
+                              upperCI = rep(NA, n))
+        k <- 1
+        for (i in levels(as.factor(df$ethn.wife))) {
+                        dfNew <- collapseData(df)
+                        res <- collapse2x2(dfNew, i) %>%
+                                oddsRatio()
+                        results[k,1] <- df$city[1]
+                        results[k,2] <- i
+                        results[k,3] <- res[1]
+                        results[k,4] <- res[2]
+                        results[k,5] <- res[3]
+                        k <- k + 1
+        }
+        results
+}
+
+# produce a table with ORS for all cities
+
+sixCities %>%
+        map_df(ethnOR2)
+
+# produce a data frame with log ORs for all six cities; remove missing values;
+# reorder levels for age groups
+
+ORData <- sixCities %>%
+        map_df(ethnOR) %>%
+        filter(is.finite(logOR)) %>%
+        mutate(ageGroup = fct_relevel(ageGroup, "16-35", "36-50", ">50"))
+
+head(ORData)
+
+# a function to produce dot plots with confidence intervals
+
+plotOR <- function(x){
+        ORData %>%
+        filter(city == x) %>%
+        ggplot(aes(x = fct_reorder(ethnGroup, logOR), y = logOR, colour = ageGroup)) +
+        geom_point(size = 3) +
+        geom_errorbar(aes(ymin = lowerCI, ymax = upperCI), width= 0.3) +
+        coord_flip() +
+        xlab("Ethnic group") +
+        ylab("Log OR")
+}
+```
+
+See Figure 2 in the paper.
+
+### Moscow
+
+```{r}
+plotOR("Moscow")
+```
+
+### Rostov
+
+```{r}
+plotOR("Rostov")
+```
+
+### Kazan
+
+```{r}
+plotOR("Kazan")
+```
+
+
+### Ufa
+
+```{r}
+plotOR("Ufa")
+```
+
+
+### Vladikavkaz
+
+```{r}
+plotOR("Vladikavkaz")
+```
+
+
+### Makhachkala
+
+```{r}
+plotOR("Makhachkala")
+```
+
+
+
+## Symmetrical odds ratios
+
+Symmetrical odds ratios are odds ratios that involve a pair of ethnic groups. For example, the odds of a Russian woman marrying a Russian rather than a Tatar man divided by the odds of a Tatar woman marrying a Russian rather than a Tatar man. See an application in the social mobility research in Bukodi and Goldthorpe. (2019). Social Mobility and Education in Britain, ch. 4.
+
+See Appendix B in the paper.
+
+```{r}
+# For each city, we want to loop over all pairs of ethnic groups and calculate the odds ratio.
+
+# A function to produce a data frame of log odds ratios for each pair of ethnicities.
+
+symmOR <- function(df){
+        # create an empty data frame to store results
+        result <- tibble(ethn.wife = character(),
+                     ethn.husband = character(),
+                     logOR = numeric())
+        k <- 1
+        # loop over ethnicities of wives and husbands
+        for (i in levels(as.factor(df$ethn.wife))) {
+                for (j in levels(as.factor(df$ethn.husband))){
+                        if (i != j) {
+                                # calculate and save log OR
+                                res <- df %>%
+                                        filter(ethn.wife == i | ethn.wife == j) %>%
+                                        filter(ethn.husband == i | ethn.husband == j) %>%
+                                        collapseData() %>%
+                                        oddsRatio()
+                                result[k, 1] <- i
+                                result[k, 2] <- j
+                                result[k, 3] <- res[1]
+                                k <- k + 1
+                        }
+                }
+        }
+        # remove duplicates (ORs are symmetrical)
+        result <- result %>%
+                mutate(key = paste0(pmin(ethn.wife, ethn.husband),
+                                    pmax(ethn.wife, ethn.husband), sep = "")) %>% 
+                distinct(key, .keep_all = TRUE) %>%
+                select(-key) %>%
+                # re-order factors as in the original data
+                mutate(ethn.wife = factor(ethn.wife, levels = levels(as.factor(df$ethn.wife)))) %>%
+                mutate(ethn.husband = factor(ethn.husband, levels = levels(as.factor(df$ethn.husband))))
+}
+
+# a function to plot the symmetrical odds ratios  
+
+plotSymmOR <- function(df){
+        df %>%
+                symmOR() %>%
+                ggplot(aes(x = ethn.wife, y = ethn.husband, fill = logOR)) +
+                        geom_tile() +
+                        geom_text(aes(label = round(logOR, 1))) +
+                        xlab("") +
+                        ylab("") +
+                        scale_fill_gradient(low = "white", high = "blue", limits = c(1, 14)) +
+                        theme_classic() +
+                        theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                              axis.line = element_blank(),
+                              axis.ticks = element_blank())
+}
+
+```
+
+### Moscow
+
+```{r}
+plotSymmOR(Moscow)
+```
+
+### Rostov
+
+```{r}
+plotSymmOR(Rostov)
+```
+
+
+### Kazan
+
+```{r}
+plotSymmOR(Kazan)
+```
+
+
+### Ufa
+
+```{r}
+plotSymmOR(Ufa)
+```
+
+### Vladikavkaz
+
+```{r}
+plotSymmOR(Vladikavkaz)
+```
+
+### Makhachkala
+
+```{r}
+plotSymmOR(Makhachkala)
+```
+
+
+## Functions to fit the models
+
+For each city I do the following:
+
+1) Fit the constant intermarriage rates model (WH + WA + HA).
+2) Fit the unidiff model (WA + HA + beta*WH).
+3) Compare G2, BIC, dissimilarity index (on the scale from 0 to 100).
+
+
+```{r}
+# a function to fit three models and produce a table with goodness-of-fit statistics
+modelIntermarriage <- function(df){
+        set.seed(15)
+        # fit the models
+        # constant
+        constant <- gnm(Freq ~ ethn.wife*age.wife + age.wife*ethn.husband + ethn.wife*ethn.husband,
+                        family = poisson, data = df)
+        # unidiff
+        unidiff<- gnm(Freq ~ ethn.wife*age.wife + ethn.husband*age.wife 
+                      + Mult(Exp(age.wife),
+       ethn.wife:ethn.husband), family = poisson, ofInterest = "[.]age.wife",
+       data = df, verbose = FALSE)
+        # a tibble to store the results, with three rows
+        res <- tibble(
+                model = c("constant", "unidiff", "unidiff vs. constant"),
+                G2 = numeric(3),
+                pvalue = numeric(3),
+                BIC = numeric(3),
+                diss = numeric(3)
+        )
+        # populating the tibble
+        res$G2 <- c(deviance(constant), deviance(unidiff), lrtest(unidiff, constant)$Chisq[2])
+        res$pvalue <- c(NA, NA, lrtest(unidiff, constant)$`Pr(>Chisq)`[2])
+        res$BIC <- round(c(BIC(constant), BIC(unidiff), NA))
+        
+        # calculating dissimilarity indices
+        dissdf <- df %>%
+        mutate(fittedConstant = constant$fitted) %>%
+        mutate(diffConstant = abs(fittedConstant - Freq)) %>%
+        mutate(fittedUnidiff = unidiff$fitted) %>%
+        mutate(diffUnidiff = abs(fittedUnidiff - Freq)) %>%
+        summarise(
+                dissConstant = sum(diffConstant) / (2 * sum(Freq)) * 100,
+                dissUnidiff = sum(diffUnidiff) / (2 * sum(Freq)) * 100
+        )
+        
+        res$diss <- c(dissdf[[1,1]], dissdf[[1,2]], NA)
+        return(res)
+}
+
+# a function to estimate unidiff contrasts and return coefficients with quasi standard errors
+
+collectUnidiff <- function(df){
+        set.seed(15)
+        # re-estimate unidiff
+        unidiff <- gnm(Freq ~ ethn.wife*age.wife + ethn.husband*age.wife + Mult(Exp(age.wife),
+                        ethn.wife:ethn.husband), family = poisson,
+                       ofInterest = "[.]age.wife", data = df, verbose = FALSE)
+        # get contrasts
+        myContrasts <- getContrasts(unidiff, ofInterest(unidiff))
+        unidiffContrasts <- tibble(
+                ageGroup = levels(as.factor(df$age.wife)),
+                coef = myContrasts$qvframe$estimate,
+                se = myContrasts$qvframe$quasiSE,
+                city = df$city[[1]]) %>%
+                mutate(ageGroup = fct_relevel(ageGroup, ">50", "36-50", "16-35"))
+      return(unidiffContrasts)
+}
+
+# Unidiff models cannot be reliably estimated for Makhachkala because of the sparseness of the data set.
+# I recode the data for Makhachkala to a smaller number of groups, keeping 6 largest groups only.
+
+Makhachkala <- Makhachkala %>%
+        mutate(ethn.wife = fct_recode(ethn.wife,
+                                      other = "Tabasaran",
+                                      other = "Nogai",
+                                      other = "Rutulian",
+                                      other = "Aghul",
+                                      other = "Azerbaijani",
+                                      other = "Tsakhur")) %>%
+        mutate(ethn.husband = fct_recode(ethn.husband,
+                                        other = "Tabasaran",
+                                      other = "Nogai",
+                                      other = "Rutulian",
+                                      other = "Aghul",
+                                      other = "Azerbaijani",
+                                      other = "Tsakhur")) %>%
+        group_by(ethn.wife, ethn.husband, age.wife) %>%
+        summarise(
+                Freq = sum(Freq)
+        ) %>%
+        mutate(city = "Makhachkala") %>%
+        ungroup()
+
+# Update sixCities
+sixCities <- list(Moscow, Rostov, Kazan, Ufa, Vladikavkaz, Makhachkala)
+names(sixCities) <- c("Moscow", "Rostov", "Kazan", "Ufa", "Vladikavkaz", "Makhachkala")
+```
+
+## Models for six cities
+
+Procucing summary statistics for the models and a plot with the unidiff coefficients.
+
+This is Table 2 and Figure 3 in the paper. 
+
+For each city, the tables show:
+
+1) the constant intermarriage rate model (the intermarriage rates do not change over time),
+2) the unidiff model (the intermarriage rates change over time),
+3) the comparison between 2) and 1).
+
+
+```{r}
+sixCities %>%
+        map(modelIntermarriage)
+
+
+
+unidiff.df <- sixCities %>%
+        map(collectUnidiff) %>%
+        bind_rows()
+
+
+# plot unidiff contrasts for all six cities
+unidiff.df %>%
+                ggplot(aes(x = ageGroup, y = coef)) +
+                geom_point() +
+                geom_errorbar(aes(ymin = coef - 2*se, ymax = coef + 2*se), width = 0.3) +
+                geom_hline(yintercept = 0, colour = "red") +
+                theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+                ylab("Unidiff coefficient") +
+                facet_wrap(~ city) +
+                theme(axis.text = element_text(size = 16),
+                        axis.title = element_text(size = 16, face="bold"))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
